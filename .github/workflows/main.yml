@@ -64,9 +64,9 @@ jobs:
             -v ${{ env.VERSION }} \
             --prefix /usr/local/bin \
             --description "Campus network auto-login tool" \
-            --maintainer "Your Name <email@example.com>" \
+            --maintainer "Spinach super_spinach@qq.com" \
             --license "MIT" \
-            --url "https://github.com/yourusername/yourrepo" \
+            --url "https://github.com/Spinach5/campus-network-login-script/" \
             -f ./dist/campus-net-login
 
       - name: Package with fpm (rpm)
@@ -76,9 +76,9 @@ jobs:
             -v ${{ env.VERSION }} \
             --prefix /usr/local/bin \
             --description "Campus network auto-login tool" \
-            --maintainer "Your Name <email@example.com>" \
+           --maintainer "Spinach super_spinach@qq.com" \
             --license "MIT" \
-            --url "https://github.com/yourusername/yourrepo" \
+            --maintainer "Spinach super_spinach@qq.com" \
             -f ./dist/campus-net-login
 
       # ---------- 上传所有构建产物 ----------
