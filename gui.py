@@ -2,17 +2,103 @@
 # -*- coding: utf-8 -*-
 """
 校园网自动登录 — 图形化界面
-基于 tkinter，读取 py/password.json 展示账号卡片，支持登录/注销操作。
+基于 tkinter，读取 py/password.json 展示账号卡片，支持登录/注销/添加账号操作。
 """
 
 import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
 
-from school_login import check_network_status, do_login, do_logout, encrypt_password, load_users
+from school_login import (
+    check_network_status, do_login, do_logout, encrypt_password,
+    load_users, save_users, init_password_file,
+)
 
 
 SERVER_MAP = {"LT": "联通", "YD": "移动", "DX": "电信"}
+ISP_TO_CODE = {"移动": "YD", "联通": "LT", "电信": "DX"}
+
+
+class AddAccountDialog:
+    """添加账号的模态对话框"""
+
+    def __init__(self, parent: tk.Tk):
+        self.result = None
+
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title("添加账号")
+        self.dialog.resizable(False, False)
+        self.dialog.transient(parent)
+        self.dialog.grab_set()
+
+        # 居中定位
+        self.dialog.update_idletasks()
+        pw, ph = 320, 230
+        px = parent.winfo_rootx() + (parent.winfo_width() - pw) // 2
+        py = parent.winfo_rooty() + (parent.winfo_height() - ph) // 2
+        self.dialog.geometry(f"{pw}x{ph}+{px}+{py}")
+
+        frame = ttk.Frame(self.dialog, padding=16)
+        frame.pack(fill="both", expand=True)
+
+        # 名称
+        ttk.Label(frame, text="名称:").grid(row=0, column=0, sticky="w", pady=(0, 6))
+        self.name_var = tk.StringVar()
+        ttk.Entry(frame, textvariable=self.name_var, width=28).grid(
+            row=0, column=1, sticky="ew", pady=(0, 6), padx=(8, 0))
+
+        # 账户
+        ttk.Label(frame, text="账户:").grid(row=1, column=0, sticky="w", pady=(0, 6))
+        self.account_var = tk.StringVar()
+        ttk.Entry(frame, textvariable=self.account_var, width=28).grid(
+            row=1, column=1, sticky="ew", pady=(0, 6), padx=(8, 0))
+
+        # 密码
+        ttk.Label(frame, text="密码:").grid(row=2, column=0, sticky="w", pady=(0, 6))
+        self.password_var = tk.StringVar()
+        ttk.Entry(frame, textvariable=self.password_var, width=28, show="*").grid(
+            row=2, column=1, sticky="ew", pady=(0, 6), padx=(8, 0))
+
+        # 运营商
+        ttk.Label(frame, text="运营商:").grid(row=3, column=0, sticky="w", pady=(0, 10))
+        self.isp_var = tk.StringVar(value="移动")
+        isp_combo = ttk.Combobox(frame, textvariable=self.isp_var,
+                                 values=["移动", "联通", "电信"],
+                                 state="readonly", width=26)
+        isp_combo.grid(row=3, column=1, sticky="ew", pady=(0, 10), padx=(8, 0))
+
+        # 按钮
+        btn_frame = ttk.Frame(frame)
+        btn_frame.grid(row=4, column=0, columnspan=2, pady=(4, 0))
+        ttk.Button(btn_frame, text="确认", width=10,
+                   command=self._on_confirm).pack(side="left", padx=(30, 10))
+        ttk.Button(btn_frame, text="取消", width=10,
+                   command=self.dialog.destroy).pack(side="left", padx=(10, 30))
+
+        self.dialog.bind("<Return>", lambda _: self._on_confirm())
+        self.dialog.bind("<Escape>", lambda _: self.dialog.destroy())
+        self.dialog.wait_window()
+
+    def _on_confirm(self):
+        name = self.name_var.get().strip()
+        account = self.account_var.get().strip()
+        password = self.password_var.get()
+        isp = self.isp_var.get()
+
+        if not account:
+            messagebox.showwarning("提示", "请输入账户", parent=self.dialog)
+            return
+        if not password:
+            messagebox.showwarning("提示", "请输入密码", parent=self.dialog)
+            return
+
+        self.result = {
+            "name": name if name else account,
+            "account": account,
+            "password": password,
+            "server": ISP_TO_CODE.get(isp, "YD"),
+        }
+        self.dialog.destroy()
 
 
 class CampusNetworkApp:
@@ -24,42 +110,49 @@ class CampusNetworkApp:
         self.root.resizable(True, True)
 
         # 状态
-        self.portal_info = None          # (portal_base, query_string, exponent, modulus, mac)
-        self.online_user_index = None    # 当前在线用户的 userIndex
-        self.current_user_card = None    # 当前在线用户对应的卡片 dict
+        self.portal_info = None
+        self.online_user_index = None
+        self.current_user_card = None
+        self.users = []
 
         self._setup_ui()
-        self._load_users()
+        self._refresh_account_list()
         self._check_network()
 
     # ---------- UI 搭建 ----------
     def _setup_ui(self):
         # 标题
         title = ttk.Label(self.root, text="校园网自动登录", font=("", 16, "bold"))
-        title.pack(pady=(12, 6))
+        title.pack(pady=(12, 4))
+
+        # 工具栏 — 左上角添加按钮
+        toolbar = ttk.Frame(self.root)
+        toolbar.pack(fill="x", padx=16, pady=(0, 4))
+        add_btn = ttk.Button(toolbar, text="添加", width=6,
+                             command=self._on_add_account)
+        add_btn.pack(side="left")
 
         # 分割线
         ttk.Separator(self.root).pack(fill="x", padx=16)
 
-        # 滚动区域 — 卡片列表
-        container = ttk.Frame(self.root)
-        container.pack(fill="both", expand=True, padx=16, pady=8)
+        # 内容区域
+        self.content = ttk.Frame(self.root)
+        self.content.pack(fill="both", expand=True, padx=16, pady=8)
 
-        self.canvas = tk.Canvas(container, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(container, orient="vertical", command=self.canvas.yview)
+        # 空状态标签（初始不显示）
+        self.empty_label = None
+
+        # 滚动区域（有账号时使用）
+        self.canvas = tk.Canvas(self.content, highlightthickness=0)
+        self.scrollbar = ttk.Scrollbar(self.content, orient="vertical", command=self.canvas.yview)
         self.cards_frame = ttk.Frame(self.canvas)
-
         self.cards_frame.bind("<Configure>",
             lambda _: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
         self._canvas_window = self.canvas.create_window((0, 0), window=self.cards_frame, anchor="nw")
-
-        # 让卡片区域宽度跟随 canvas
         self.canvas.bind("<Configure>", self._on_canvas_configure)
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
 
-        self.canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-
-        # 鼠标滚轮支持
+        # 鼠标滚轮
         self.canvas.bind("<Enter>", lambda _: self._bind_scroll())
         self.canvas.bind("<Leave>", lambda _: self._unbind_scroll())
 
@@ -71,13 +164,11 @@ class CampusNetworkApp:
         status_row = ttk.Frame(bottom)
         status_row.pack(fill="x")
 
-        # 左下角：网络状态
         self.network_var = tk.StringVar(value="正在检测网络...")
         self.network_label = ttk.Label(status_row, textvariable=self.network_var,
                                        padding=(8, 3), foreground="gray")
         self.network_label.pack(side="left")
 
-        # 右下角：操作状态
         self.action_var = tk.StringVar(value="")
         action_label = ttk.Label(status_row, textvariable=self.action_var,
                                  padding=(8, 3))
@@ -87,10 +178,8 @@ class CampusNetworkApp:
         self.canvas.itemconfig(self._canvas_window, width=event.width)
 
     def _bind_scroll(self):
-        # Linux: Button-4/5
         self.canvas.bind_all("<Button-4>", lambda e: self.canvas.yview_scroll(-1, "units"))
         self.canvas.bind_all("<Button-5>", lambda e: self.canvas.yview_scroll(1, "units"))
-        # Windows/Mac: MouseWheel
         self.canvas.bind_all("<MouseWheel>",
             lambda e: self.canvas.yview_scroll(-1 * (e.delta // 120), "units"))
 
@@ -99,29 +188,49 @@ class CampusNetworkApp:
         self.canvas.unbind_all("<Button-5>")
         self.canvas.unbind_all("<MouseWheel>")
 
-    # ---------- 数据加载 ----------
-    def _load_users(self):
-        try:
-            users = load_users()
-        except Exception as e:
-            self.action_var.set(f"加载配置失败: {e}")
-            empty = ttk.Label(self.cards_frame, text="未找到 py/password.json，请先创建配置文件。",
-                              foreground="gray")
-            empty.pack(pady=20)
-            return
+    # ---------- 账号列表刷新 ----------
+    def _refresh_account_list(self):
+        """重新加载 password.json 并刷新界面"""
+        self.users = load_users()
 
-        if not users:
-            self.action_var.set("配置文件中没有账号")
-            return
+        # 清除现有内容
+        for w in self.cards_frame.winfo_children():
+            w.destroy()
+        if self.empty_label:
+            self.empty_label.destroy()
+            self.empty_label = None
 
-        for u in users:
-            self._create_card(u)
+        # 隐藏滚动区域
+        self.canvas.pack_forget()
+        for child in self.content.winfo_children():
+            if child != self.canvas:
+                child.pack_forget()
 
-        self.action_var.set("就绪 — 请选择账号登录")
+        if not self.users:
+            # 空状态
+            self.empty_label = ttk.Label(
+                self.content, text="没有任何账号",
+                font=("", 18, "bold"), foreground="gray")
+            self.empty_label.pack(expand=True)
+            self.action_var.set("")
+        else:
+            # 显示账号卡片
+            self.canvas.pack(side="left", fill="both", expand=True)
+            self.scrollbar.pack(side="right", fill="y")
+            for u in self.users:
+                self._create_card(u)
+            self.action_var.set("就绪 — 请选择账号登录")
+
+    # ---------- 添加账号 ----------
+    def _on_add_account(self):
+        dialog = AddAccountDialog(self.root)
+        if dialog.result:
+            self.users.append(dialog.result)
+            save_users(self.users)
+            self._refresh_account_list()
 
     # ---------- 卡片组件 ----------
     def _create_card(self, user: dict):
-        """为单个用户创建卡片，包含信息区、按钮区和状态区"""
         card = ttk.LabelFrame(self.cards_frame)
         card.pack(fill="x", pady=5)
 
@@ -133,7 +242,6 @@ class CampusNetworkApp:
                                font=("", 12, "bold"))
         name_label.pack(side="left")
 
-        # 按钮 — 初始为"登录"
         btn = ttk.Button(top_row, text="登录", width=6)
         btn.pack(side="right")
         btn.config(command=lambda u=user: self._on_login_click(u))
@@ -153,7 +261,6 @@ class CampusNetworkApp:
         status_label = ttk.Label(card, text="", foreground="gray", padding=(10, 0))
         status_label.pack(anchor="w", pady=(0, 6))
 
-        # 保存引用
         user["_widgets"] = {
             "card": card,
             "btn": btn,
@@ -163,7 +270,6 @@ class CampusNetworkApp:
 
     # ---------- 网络探测 ----------
     def _check_network(self):
-        """后台线程：检测网络状态并更新 UI"""
         def run():
             try:
                 status, portal_info = check_network_status()
@@ -185,7 +291,8 @@ class CampusNetworkApp:
                 self.network_label.config(foreground=color_map.get(status, "gray"))
 
                 if status in ("已连接校园网", "已连接校园网，暂未登录"):
-                    self.action_var.set("就绪 — 请选择账号登录")
+                    if self.users:
+                        self.action_var.set("就绪 — 请选择账号登录")
                 elif status == "已连接网络(非校园网)":
                     self.action_var.set("非校园网环境，登录功能不可用")
                 else:
@@ -298,6 +405,7 @@ class CampusNetworkApp:
 
 
 def launch_gui():
+    init_password_file()
     root = tk.Tk()
     CampusNetworkApp(root)
     root.mainloop()
