@@ -1,42 +1,116 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+校园网自动登录脚本
+支持多账号、自动探测 Portal、RSA 密码加密、运营商选择。
+"""
+
 import os
-import execjs
 import sys
 import json
 import re
-import requests
 from urllib.parse import urlparse, urljoin
+from typing import Dict, List, Optional
 
-DETECT_URL = "http://www.baidu.com"
-DEFAULT_MAC = "111111111"
+import requests
+import execjs
 
 
-def get_redirect_info(detect_url=DETECT_URL):
+# ---------- 常量配置 ----------
+DETECT_URL = "http://www.baidu.com"   # 用于触发 Portal 重定向的外网地址
+DEFAULT_MAC = "111111111"              # 当无法从 queryString 提取 MAC 时的默认值
+RSA_JS_FILE = "rsa_full.js"            # 前端 RSA 加密库文件
+
+
+# ---------- 工具函数 ----------
+def get_redirect_info(detect_url: str = DETECT_URL) -> str:
+    """
+    访问外网地址，获取 Portal 重定向的完整 URL（含 queryString）。
+    返回如：http://172.16.54.18/eportal/index.jsp?wlanuserip=...
+    """
     resp = requests.get(detect_url, timeout=10, allow_redirects=False)
     if resp.status_code not in (301, 302, 303, 307, 308):
-        raise Exception(f"未发生重定向 (状态码 {resp.status_code})，可能已在线")
+        raise Exception(f"未发生重定向 (HTTP {resp.status_code})，可能已在线或无需认证")
     location = resp.headers.get("Location")
     if not location:
-        raise Exception("重定向响应中无 Location 头")
+        raise Exception("重定向响应中缺少 Location 头")
     return location
 
 
-def _post_api(portal_base, method, data):
-    """POST 到 /eportal/InterFace.do?method=xxx，返回解析后的 JSON。"""
+def _get_api(portal_base: str, method: str, params: Dict) -> Dict:
+    """
+    发送 GET 请求到 /eportal/InterFace.do，返回解析后的 JSON。
+    适用于 pageInfo、getOnlineUserInfo 等接口。
+    """
     url = urljoin(portal_base, f"/eportal/InterFace.do?method={method}")
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
-    resp = requests.post(url, data=data, headers=headers, timeout=10)
+    resp = requests.get(url, params=params, headers=headers, timeout=10)
+    resp.raise_for_status()
     return resp.json()
 
 
-def fetch_page_info(portal_base, query_string):
-    """调用 pageInfo API 获取加密公钥及其他配置。"""
-    data = {"queryString": query_string}
-    return _post_api(portal_base, "pageInfo", data)
+def _post_api(portal_base: str, method: str, data: Dict) -> Dict:
+    """
+    发送 POST 请求到 /eportal/InterFace.do，返回解析后的 JSON。
+    适用于 login 等接口。
+    """
+    url = urljoin(portal_base, f"/eportal/InterFace.do?method={method}")
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    resp = requests.post(url, data=data, headers=headers, timeout=10)
+    resp.raise_for_status()
+    return resp.json()
 
 
-def load_users(json_path="py/password.json"):
+def fetch_page_info(portal_base: str, query_string: str) -> Dict:
+    """
+    调用 pageInfo API 获取 RSA 公钥、加密开关等配置。
+    注意：此接口为 GET 请求，参数 queryString 通过 URL 传递。
+    """
+    return _get_api(portal_base, "pageInfo", {"queryString": query_string})
+
+
+def do_login(portal_base: str, username: str, encrypted_pwd: str,
+             service: str, query_string: str) -> Dict:
+    """执行登录请求（POST）"""
+    data = {
+        "userId": username,
+        "password": encrypted_pwd,
+        "service": service,
+        "queryString": query_string,
+        "operatorPwd": "",
+        "operatorUserId": "",
+        "validcode": "",
+        "passwordEncrypt": "true",
+        "method": "login",
+    }
+    return _post_api(portal_base, "login", data)
+
+
+def get_online_user_info(portal_base: str, user_index: str) -> Optional[str]:
+    """获取用户的上网重定向地址（userUrl）"""
+    try:
+        data = _get_api(portal_base, "getOnlineUserInfo", {"userIndex": user_index})
+        if data.get("result") == "success":
+            return data.get("userUrl")
+        else:
+            print(f"⚠️ 获取在线信息失败: {data.get('message')}")
+            return None
+    except Exception as e:
+        print(f"⚠️ 获取在线信息异常: {e}")
+        return None
+
+
+def extract_mac_from_query(query: str) -> str:
+    """从 queryString 中提取 MAC 地址（wlanparameter 或 mac 参数）"""
+    match = re.search(r"wlanparameter=([0-9A-Fa-f\-]+)", query)
+    if not match:
+        match = re.search(r"mac=([0-9A-Fa-f]+)", query)
+    return match.group(1) if match else DEFAULT_MAC
+
+
+# ---------- 用户配置处理 ----------
+def load_users(json_path: str = "py/password.json") -> List[Dict]:
+    """加载用户配置文件，支持相对/绝对路径"""
     if not os.path.exists(json_path):
         json_path = "password.json"
     if not os.path.exists(json_path):
@@ -44,11 +118,12 @@ def load_users(json_path="py/password.json"):
     with open(json_path, "r", encoding="utf-8") as f:
         users = json.load(f)
     if not isinstance(users, list):
-        raise ValueError("password.json 格式错误")
+        raise ValueError("password.json 格式错误，应为 JSON 数组")
     return users
 
 
-def select_user(users):
+def select_user(users: List[Dict]) -> Dict:
+    """交互式选择要登录的账号"""
     print("\n========== 请选择登录账号 ==========")
     for idx, u in enumerate(users, 1):
         name = u.get("name", "未命名")
@@ -65,70 +140,45 @@ def select_user(users):
             print("输入无效，请输入数字")
 
 
-def encrypt_password(plain_pwd, exponent, modulus):
-    """使用与 portal 页面完全一致的逻辑加密密码。"""
-    js_path = os.path.join(os.path.dirname(__file__), "rsa_full.js")
+# ---------- RSA 加密 ----------
+def encrypt_password(plain_pwd: str, mac: str, exponent: str, modulus: str) -> str:
+    """
+    使用与 Portal 前端完全一致的逻辑加密密码：
+    1. 拼接 "密码>MAC"
+    2. 反转整个字符串
+    3. 调用 RSAUtils.encryptedString 加密
+    """
+    js_path = os.path.join(os.path.dirname(__file__), RSA_JS_FILE)
     if not os.path.exists(js_path):
-        raise FileNotFoundError("缺失 rsa_full.js 文件")
+        raise FileNotFoundError(f"缺失 {RSA_JS_FILE} 文件，请确保该文件存在")
+
     with open(js_path, "r", encoding="utf-8") as f:
         rsa_lib = f.read()
-    # rsa_full.js 原先面向浏览器（})(window)），execjs 底层是 Node.js 需要 globalThis
+
+    # 适配 Node.js 环境（原库依赖浏览器 window 对象）
     rsa_lib = rsa_lib.replace("})(window)", "})(globalThis)")
+
+    # 构造待加密字符串并反转
+    combined = f"{plain_pwd}>{mac}"
+    reversed_str = combined[::-1]
+
     js_code = rsa_lib + f"""
     function doEncrypt() {{
-        var passwordEncode = "{plain_pwd}".split("").reverse().join("");
+        var passwordEncode = "{reversed_str}";
         RSAUtils.setMaxDigits(400);
         var key = new RSAUtils.getKeyPair("{exponent}", "", "{modulus}");
-        return RSAUtils.encryptedString(key, passwordEncode);
+        var encrypted = RSAUtils.encryptedString(key, passwordEncode);
+        return encrypted.replace(/ /g, "");
     }}
     """
     ctx = execjs.compile(js_code)
     encrypted = ctx.call("doEncrypt")
-    return encrypted.replace(" ", "")
+    return encrypted
 
 
-def do_login(portal_base, username, encrypted_pwd, service, query_string):
-    data = {
-        "userId": username,
-        "password": encrypted_pwd,
-        "service": service,
-        "queryString": query_string,
-        "operatorPwd": "",
-        "operatorUserId": "",
-        "validcode": "",
-        "passwordEncrypt": "true",
-        "method": "login",
-    }
-    return _post_api(portal_base, "login", data)
-
-
-def get_online_user_info(portal_base, user_index):
-    url = urljoin(portal_base, "/eportal/InterFace.do?method=getOnlineUserInfo")
-    params = {"method": "getOnlineUserInfo", "userIndex": user_index}
-    resp = requests.get(url, params=params, timeout=10)
-    try:
-        data = resp.json()
-        if data.get("result") == "success":
-            return data.get("userUrl")
-        else:
-            print(f"⚠️ 获取在线信息失败: {data.get('message')}")
-            return None
-    except Exception:
-        print("⚠️ 解析在线信息失败")
-        return None
-
-
-def extract_mac_from_query(query):
-    match = re.search(r"wlanparameter=([0-9A-Fa-f\-]+)", query)
-    if not match:
-        match = re.search(r"mac=([0-9A-Fa-f]+)", query)
-    if match:
-        return match.group(1)
-    return DEFAULT_MAC
-
-
+# ---------- 主流程 ----------
 def main():
-    # 1. 探测认证地址
+    # 1. 探测 Portal 重定向地址
     print("[*] 正在探测 Portal 认证地址...")
     try:
         full_auth_url = get_redirect_info()
@@ -137,19 +187,20 @@ def main():
         print(f"❌ {e}")
         sys.exit(1)
 
+    # 2. 解析 Portal 基础地址和 queryString
     parsed = urlparse(full_auth_url)
     portal_base = f"{parsed.scheme}://{parsed.netloc}"
     query_string = parsed.query
     print(f"[*] Portal 基础地址: {portal_base}")
 
-    # 2. 通过 pageInfo API 获取 RSA 公钥
-    print("[*] 调用 pageInfo API 获取加密密钥...")
+    # 3. 调用 pageInfo 获取公钥和加密开关
+    print("[*] 调用 pageInfo API 获取 RSA 公钥...")
     try:
         info = fetch_page_info(portal_base, query_string)
         exponent = info.get("publicKeyExponent", "")
         modulus = info.get("publicKeyModulus", "")
         if not exponent or not modulus:
-            raise Exception(f"pageInfo 返回中缺少公钥: {json.dumps(info, ensure_ascii=False)[:300]}")
+            raise Exception(f"pageInfo 返回缺少公钥字段: {json.dumps(info, ensure_ascii=False)[:200]}")
         print(f"[+] 公钥获取成功")
         print(f"    exponent: {exponent}")
         print(f"    modulus: {modulus[:40]}...")
@@ -157,7 +208,7 @@ def main():
         print(f"❌ {e}")
         sys.exit(1)
 
-    # 3. 选择用户
+    # 4. 加载用户配置
     try:
         users = load_users()
     except Exception as e:
@@ -167,25 +218,27 @@ def main():
         print("❌ 用户列表为空")
         sys.exit(1)
 
+    # 5. 交互选择用户
     user = select_user(users)
     username = user["account"]
     plain_pwd = user["password"]
     service = user.get("server", "LT")
     print(f"\n[*] 已选择: {user.get('name')} ({username}) 服务: {service}")
 
+    # 6. 提取 MAC 地址
     mac = extract_mac_from_query(query_string)
     print(f"[*] 使用 MAC: {mac}")
 
-    # 4. 加密密码
+    # 7. RSA 加密密码
     print("[*] 正在加密密码...")
     try:
-        encrypted_pwd = encrypt_password(plain_pwd, exponent, modulus)
+        encrypted_pwd = encrypt_password(plain_pwd, mac, exponent, modulus)
         print(f"[+] 加密完成，密文长度: {len(encrypted_pwd)}")
     except Exception as e:
         print(f"❌ 密码加密失败: {e}")
         sys.exit(1)
 
-    # 5. 执行登录
+    # 8. 发送登录请求
     print("[*] 执行登录...")
     try:
         result = do_login(portal_base, username, encrypted_pwd, service, query_string)
@@ -193,6 +246,7 @@ def main():
         print(f"❌ 登录请求失败: {e}")
         sys.exit(1)
 
+    # 9. 处理认证结果
     if result.get("result") != "success":
         error_msg = result.get("message", "未知错误")
         print(f"❌ 认证失败: {error_msg}")
@@ -203,17 +257,6 @@ def main():
     keepalive_interval = result.get("keepaliveInterval")
     print(f"   userIndex: {user_index}")
     print(f"   keepaliveInterval: {keepalive_interval} 秒")
-
-    if user_index:
-        print("[*] 正在获取上网重定向地址...")
-        user_url = get_online_user_info(portal_base, user_index)
-        if user_url:
-            print(f"\n📡 重定向地址: {user_url}")
-        else:
-            print("\n⚠️ 未能获取 userUrl，但认证已通过")
-    else:
-        print("\n⚠️ 未返回 userIndex，但认证已通过")
-
 
 if __name__ == "__main__":
     main()
