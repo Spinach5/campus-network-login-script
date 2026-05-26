@@ -116,7 +116,19 @@ pip install -r requirements.txt
 python school_login.py
 ```
 
-运行后，终端会列出配置文件中所有账号，输入对应序号即可自动完成认证。认证成功后会输出上网重定向地址（如 `http://www.baidu.com`）。
+## 运行参数
+```bash
+#使用gui界面
+python school_login.py
+
+#使用命令行选择
+python school_login.py -cli
+
+#使用命令行指定账号,密码,运营商
+python school_login.py -u <account> -p <password> -s <server>
+
+```
+
 
 ## ⚠️ 注意事项
 

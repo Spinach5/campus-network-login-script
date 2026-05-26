@@ -186,17 +186,36 @@ def check_network_status() -> Tuple[str, Optional[Tuple[str, str, str, str, str]
 
 
 # ---------- 用户配置处理 ----------
-def load_users(json_path: str = "py/password.json") -> List[Dict]:
-    """加载用户配置文件，支持相对/绝对路径"""
+PASSWORD_FILE = "py/password.json"
+
+
+def init_password_file(json_path: str = PASSWORD_FILE) -> bool:
+    """确保 password.json 存在，若不存在则创建空数组。返回 True 表示新创建。"""
     if not os.path.exists(json_path):
-        json_path = "password.json"
-    if not os.path.exists(json_path):
-        raise FileNotFoundError(f"未找到配置文件: {json_path}")
+        os.makedirs(os.path.dirname(json_path) or ".", exist_ok=True)
+        with open(json_path, "w", encoding="utf-8") as f:
+            f.write("[]")
+        return True
+    return False
+
+
+def load_users(json_path: str = PASSWORD_FILE) -> List[Dict]:
+    """加载用户配置文件，若文件不存在则自动初始化。为空时打印提示。"""
+    init_password_file(json_path)
     with open(json_path, "r", encoding="utf-8") as f:
         users = json.load(f)
     if not isinstance(users, list):
         raise ValueError("password.json 格式错误，应为 JSON 数组")
+    if not users:
+        print("没有账号信息")
     return users
+
+
+def save_users(users: List[Dict], json_path: str = PASSWORD_FILE) -> None:
+    """保存用户列表到配置文件"""
+    os.makedirs(os.path.dirname(json_path) or ".", exist_ok=True)
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(users, f, ensure_ascii=False, indent=2)
 
 
 def select_user(users: List[Dict]) -> Dict:
