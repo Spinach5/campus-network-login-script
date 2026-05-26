@@ -1,10 +1,10 @@
-name: Build for Windows, Linux, macOS
+name: Build and Package for Windows, Linux, macOS
 
 on:
   push:
     tags:
-      - 'v*'             # 当推送 v1.0.0 等 tag 时触发
-  workflow_dispatch:     # 支持手动触发
+      - 'v*'
+  workflow_dispatch:
 
 jobs:
   build:
@@ -40,38 +40,93 @@ jobs:
         run: |
           pyinstaller --onefile --name campus-net-login school_login.py
 
-      - name: Upload artifact
+      # ---------- Linux 专用：使用 fpm 打包成 deb/rpm ----------
+      - name: Install fpm (Linux only)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ruby-full
+          sudo gem install fpm
+
+      - name: Get version from tag
+        if: runner.os == 'Linux' && github.ref_type == 'tag'
+        id: tag_version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_ENV
+
+      - name: Fallback version for manual run
+        if: runner.os == 'Linux' && github.ref_type != 'tag'
+        run: echo "VERSION=0.0.0" >> $GITHUB_ENV
+
+      - name: Package with fpm (deb)
+        if: runner.os == 'Linux'
+        run: |
+          fpm -s dir -t deb -n campus-net-login \
+            -v ${{ env.VERSION }} \
+            --prefix /usr/local/bin \
+            --description "Campus network auto-login tool" \
+            --maintainer "Your Name <email@example.com>" \
+            --license "MIT" \
+            --url "https://github.com/yourusername/yourrepo" \
+            -f ./dist/campus-net-login
+
+      - name: Package with fpm (rpm)
+        if: runner.os == 'Linux'
+        run: |
+          fpm -s dir -t rpm -n campus-net-login \
+            -v ${{ env.VERSION }} \
+            --prefix /usr/local/bin \
+            --description "Campus network auto-login tool" \
+            --maintainer "Your Name <email@example.com>" \
+            --license "MIT" \
+            --url "https://github.com/yourusername/yourrepo" \
+            -f ./dist/campus-net-login
+
+      # ---------- 上传所有构建产物 ----------
+      - name: Upload artifact (generic)
         uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.artifact_name }}
           path: dist/campus-net-login${{ matrix.executable_ext }}
 
-  # ========== 新增：自动发布到 Release ==========
+      - name: Upload .deb package (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v5
+        with:
+          name: campus-net-login-linux-deb
+          path: ./campus-net-login*.deb
+
+      - name: Upload .rpm package (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v5
+        with:
+          name: campus-net-login-linux-rpm
+          path: ./campus-net-login*.rpm
+
+  # ---------- 自动发布到 Release ----------
   release:
-    needs: build          # 等待 build 任务完成
+    needs: build
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')  # 仅在 tag 推送时发布
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     permissions:
-      contents: write     # 必须授予写入 Release 的权限
+      contents: write
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          path: artifacts  # 将所有构件下载到 artifacts 目录下
+          path: artifacts
 
-      - name: Display structure of downloaded files
+      - name: List all downloaded files
         run: ls -R artifacts
 
       - name: Create Release and upload assets
         uses: softprops/action-gh-release@v2
         with:
-          name: Release ${{ github.ref_name }}          # Release 标题，使用 tag 名
+          name: Release ${{ github.ref_name }}
           body: |
             ## 校园网自动登录工具 ${{ github.ref_name }}
             ### 更新内容
-            - 自动构建发布
-            - 支持 Windows / Linux / macOS
+            - 自动构建并打包为各平台可执行文件及 Linux 安装包
           draft: false
           prerelease: false
           files: |
-            artifacts/**/*   # 上传 artifacts 目录下的所有文件
+            artifacts/**/*
