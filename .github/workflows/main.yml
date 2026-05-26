@@ -1,0 +1,47 @@
+name: Build for Windows, Linux, macOS
+
+on:
+  push:
+    tags:
+      - 'v*'             # 当推送 v1.0.0 等 tag 时触发
+  workflow_dispatch:     # 支持手动触发
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            artifact_name: campus-net-login-windows
+            executable_ext: .exe
+          - os: ubuntu-latest
+            artifact_name: campus-net-login-linux
+            executable_ext: ''
+          - os: macos-latest
+            artifact_name: campus-net-login-macos
+            executable_ext: ''
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller --onefile --name campus-net-login school_login.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/campus-net-login${{ matrix.executable_ext }}
