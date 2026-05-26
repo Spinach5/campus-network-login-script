@@ -9,10 +9,15 @@ import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
 
-from school_login import (
-    check_network_status, do_login, do_logout, encrypt_password,
-    load_users, save_users, init_password_file,
+from portal import (
+    check_network_status, detect_portal, do_login, do_logout,
+    get_online_user_info,
 )
+from config import (
+    add_portal_to_user_weblist, init_password_file, load_users,
+    save_user_index, save_user_portal_info, save_users,
+)
+from crypto import encrypt_password
 
 
 SERVER_MAP = {"LT": "联通", "YD": "移动", "DX": "电信"}
@@ -272,9 +277,9 @@ class CampusNetworkApp:
     def _check_network(self):
         def run():
             try:
-                status, portal_info = check_network_status()
+                status, portal_info, online_user = check_network_status()
             except Exception:
-                status, portal_info = "未连接任何网络", None
+                status, portal_info, online_user = "未连接任何网络", None, None
 
             if portal_info:
                 self.portal_info = portal_info
@@ -290,7 +295,18 @@ class CampusNetworkApp:
                 self.network_var.set(status)
                 self.network_label.config(foreground=color_map.get(status, "gray"))
 
-                if status in ("已连接校园网", "已连接校园网，暂未登录"):
+                if online_user:
+                    u = online_user["user"]
+                    info = online_user["info"]
+                    self.online_user_index = info.get("userIndex")
+                    self.current_user_card = u
+                    svc = info.get("realServiceName", "")
+                    isp_name = SERVER_MAP.get(svc, svc)
+                    self.action_var.set(
+                        f"当前在线: {u.get('name')} ({u.get('account')})"
+                        f" | {isp_name}")
+                    self._highlight_online_card(u)
+                elif status == "已连接校园网，暂未登录":
                     if self.users:
                         self.action_var.set("就绪 — 请选择账号登录")
                 elif status == "已连接网络(非校园网)":
@@ -300,6 +316,21 @@ class CampusNetworkApp:
 
             self.root.after(0, update_ui)
         threading.Thread(target=run, daemon=True).start()
+
+    def _highlight_online_card(self, online_user: dict):
+        """将已在线用户的卡片标记为已登录状态。"""
+        target_account = online_user.get("account", "")
+        for u in self.users:
+            widgets = u.get("_widgets")
+            if not widgets:
+                continue
+            if u.get("account") == target_account:
+                widgets["btn"].config(state="normal", text="注销",
+                                      command=lambda u=u: self._on_logout_click(u))
+                widgets["status_label"].config(text="已登录", foreground="green")
+            else:
+                widgets["btn"].config(state="disabled", text="登录")
+                widgets["status_label"].config(text="已有其他账号在线", foreground="gray")
 
     # ---------- 登录流程 ----------
     def _on_login_click(self, user: dict):
@@ -311,6 +342,34 @@ class CampusNetworkApp:
             messagebox.showwarning("提示", "已有账号在线，请先注销后再切换账号")
             return
 
+        # portal_info: (portal_base, query_string, exponent, modulus, mac)
+        exponent = self.portal_info[2]
+        modulus = self.portal_info[3]
+
+        # 如果 portal_info 来自已保存 portal 检测，缺少 RSA 密钥，需要重新探测
+        if not exponent or not modulus:
+            widgets = user["_widgets"]
+            widgets["btn"].config(state="disabled", text="...")
+            widgets["status_label"].config(text="正在探测 Portal...", foreground="blue")
+            self.action_var.set("重新探测 Portal 认证信息...")
+            self._re_detect_and_login(user)
+            return
+
+        self._do_login(user)
+
+    def _re_detect_and_login(self, user: dict):
+        """重新探测 Portal 获取 RSA 密钥后再登录。"""
+        def run():
+            try:
+                new_info = detect_portal()
+                self.portal_info = new_info
+                self.root.after(0, lambda: self._do_login(user))
+            except Exception as e:
+                self.root.after(0, lambda: self._on_login_fail(user, f"Portal 探测失败: {e}"))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _do_login(self, user: dict):
+        """执行实际的登录请求。"""
         widgets = user["_widgets"]
         widgets["btn"].config(state="disabled", text="...")
         widgets["status_label"].config(text="正在登录...", foreground="blue")
@@ -337,15 +396,30 @@ class CampusNetworkApp:
         self.online_user_index = user_index
         self.current_user_card = user
 
-        widgets = user["_widgets"]
-        widgets["btn"].config(state="normal", text="注销",
-                              command=lambda u=user: self._on_logout_click(u))
-        widgets["status_label"].config(text="已登录", foreground="green")
+        # 高亮当前用户卡片，禁用其他
+        self._highlight_online_card(user)
+
         self.action_var.set(f"{user.get('name')} 登录成功")
         self.network_var.set("已连接校园网")
         self.network_label.config(foreground="green")
 
+        # 保存 Portal 地址、userIndex 和用户详细信息
+        if self.portal_info:
+            portal_base = self.portal_info[0]
+            add_portal_to_user_weblist(user["account"], portal_base)
+            save_user_index(user["account"], user_index)
+            self._fetch_and_save_portal_info(user["account"], portal_base, user_index)
+
         messagebox.showinfo("登录成功", f"{user.get('name')} 登录成功！")
+
+    def _fetch_and_save_portal_info(self, account: str, portal_base: str,
+                                     user_index: str):
+        """后台线程：获取在线用户信息并保存到本地配置。"""
+        def run():
+            info = get_online_user_info(portal_base, user_index)
+            if info:
+                save_user_portal_info(account, info)
+        threading.Thread(target=run, daemon=True).start()
 
     def _on_login_fail(self, user: dict, error: str):
         widgets = user["_widgets"]
@@ -387,13 +461,21 @@ class CampusNetworkApp:
         self.online_user_index = None
         self.current_user_card = None
 
-        widgets = user["_widgets"]
-        widgets["btn"].config(state="normal", text="登录",
-                              command=lambda u=user: self._on_login_click(u))
-        widgets["status_label"].config(text="", foreground="gray")
+        # 重置所有卡片状态
+        for u in self.users:
+            w = u.get("_widgets")
+            if not w:
+                continue
+            w["btn"].config(state="normal", text="登录",
+                            command=lambda u=u: self._on_login_click(u))
+            w["status_label"].config(text="", foreground="gray")
+
         self.action_var.set(f"{user.get('name')} 已注销")
         self.network_var.set("已连接校园网，暂未登录")
         self.network_label.config(foreground="orange")
+
+        # 重新检测网络，获取完整 Portal 信息（RSA 密钥等）
+        self._check_network()
 
         messagebox.showinfo("注销成功", "已退出登录")
 

@@ -18,26 +18,48 @@ Requires Node.js (for `execjs` JS runtime) and Python 3.7+.
 ## Architecture
 
 ```
-school_login.py          # Main entry point — full login flow
+school_login.py          # CLI entry point — orchestrates login flow
+portal.py                # Portal detection, API calls, network status
+crypto.py                # RSA encryption via execjs
+config.py                # User config CRUD (password.json), auto-detect, portal info persistence
+gui.py                   # Tkinter GUI
 rsa_full.js              # Third-party RSA big-integer library (David Shapiro, mod. Fuchun)
 py/password.json         # User credentials (gitignored, use py/password.example.json as template)
 requirements.txt         # pip dependencies
 ```
 
+### Module responsibilities
+
+**`portal.py`** — All network/Portal interaction:
+- `get_redirect_info()` — GETs `http://www.baidu.com` to trigger captive portal redirect
+- `detect_portal()` — combines redirect + `pageInfo` + MAC extraction into one call
+- `fetch_page_info()` — GET `/eportal/InterFace.do?method=pageInfo` for RSA public key
+- `do_login()` / `do_logout()` — POST login/logout requests
+- `get_online_user_info()` — POST, returns full user detail dict (userName, service, package, etc.)
+- `check_network_status()` — full network detection: redirect detection, saved-portal fallback, online user identification
+- `_get_api()` / `_post_api()` — generic Portal API helpers (hit `/eportal/InterFace.do?method=...`)
+
+**`crypto.py`** — RSA password encryption:
+- `encrypt_password()` — runs `rsa_full.js` via `execjs`, implements the `{password}>{MAC}` + reverse + RSA pipeline
+
+**`config.py`** — Local user configuration:
+- `load_users()` / `save_users()` — read/write `py/password.json`
+- `select_user()` — interactive CLI account picker
+- `auto_detect_user()` — match current portal_base against users' `webList`
+- `add_portal_to_user_weblist()` — save portal address to user config
+- `save_user_portal_info()` — persist online user details (userName, userId, userMac, etc.) from `getOnlineUserInfo`
+
+**`school_login.py`** — CLI entry point, imports from the three modules above and runs the login flow.
+
+**`gui.py`** — Tkinter GUI, imports from `portal`, `crypto`, `config`.
+
 **Login flow in `school_login.py`:**
 
-1. `get_redirect_info()` — GETs `http://www.baidu.com` without following redirects; the captive portal returns a 3xx with a `Location` header pointing to the full auth URL (includes `queryString`).
-2. Parse `portal_base` (scheme+netloc) and `query_string` from the redirect URL.
-3. `fetch_page_info()` — calls `/eportal/InterFace.do?method=pageInfo` (GET) to retrieve `publicKeyExponent`, `publicKeyModulus`, and other portal config.
-4. `load_users()` / `select_user()` — load credentials from `py/password.json`, prompt user to pick one interactively.
-5. `extract_mac_from_query()` — pulls the MAC address from the `queryString` (falls back to `DEFAULT_MAC = "111111111"`).
-6. `encrypt_password()` — uses `execjs` to run `rsa_full.js` in-process. The password is combined with the MAC (`password>MAC`), reversed, then RSA-encrypted with the portal's public key.
-7. `do_login()` — POSTs encrypted credentials to `/eportal/InterFace.do?method=login`.
-8. Prints result — on success, outputs `userIndex` and `keepaliveInterval`.
-
-Two generic API helpers wrap the portal endpoints: `_get_api()` and `_post_api()`. Both hit `/eportal/InterFace.do` with a `method` query param and return parsed JSON.
-
-`get_online_user_info()` is defined but not called in the current `main()` flow — it exists as a utility for fetching the post-login redirect URL.
+1. `detect_portal()` — triggers redirect → parses portal_base + query_string + RSA keys + MAC
+2. `load_users()` / `auto_detect_user()` / `select_user()` — load config, auto-match or prompt
+3. `encrypt_password()` — RSA-encrypt with Portal public key
+4. `do_login()` — POST credentials
+5. On success: `add_portal_to_user_weblist()` + `get_online_user_info()` + `save_user_portal_info()`
 
 ## RSA encryption
 
@@ -55,13 +77,28 @@ The encryption scheme is specific to 深澜 portals:
 `py/password.json` is a JSON array (template at `py/password.example.json`):
 
 ```json
-[{"name": "Display Name", "account": "student_id", "password": "plaintext_pwd", "server": "LT"}]
+[{
+  "name": "Display Name",
+  "account": "student_id",
+  "password": "plaintext_pwd",
+  "server": "LT",
+  "webList": [],
+  "userName": "",
+  "userId": "",
+  "userMac": "",
+  "realServiceName": "",
+  "userPackage": "",
+  "userIndex": ""
+}]
 ```
 
 - `server`: ISP code — `LT` (联通), `YD` (移动), `DX` (电信)
+- `webList`: auto-populated portal addresses the user has connected from
+- `userName`/`userId`/etc.: auto-populated from `getOnlineUserInfo` after first successful login
 
 ## Notes
 
 - `DETECT_URL` is `http://www.baidu.com` (not HTTPS) — captive portals intercept HTTP but pass HTTPS through.
-- The `pageInfo` API (step 3) is a GET request, not HTML scraping. The `login` API is a POST.
+- The `pageInfo` API is a GET request; `login`, `logout`, `getOnlineUserInfo` are POST.
+- `check_network_status()` returns a 3-tuple `(status, portal_info, online_user)` — the third element carries auto-detected user info when the user is already logged in.
 - `rsa_full.js` is a static third-party file extracted from the portal page; if the portal updates its encryption, this file must be updated to match.

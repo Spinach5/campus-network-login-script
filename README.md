@@ -6,6 +6,8 @@
 
 一个轻量、易用的校园网自动登录工具，支持多账号配置、自动 RSA 加密认证、运营商选择，一键完成校园网登录认证，彻底告别手动打开网页输密码的繁琐操作。
 
+[github仓库](https://github.com/Spinach5/campus-network-login-script)
+
 ## ✨ 特性
 
 - **多账号支持**：可配置多个账号，运行时自由选择切换
@@ -34,7 +36,7 @@ execjs>=1.5.1
 ```
 
 标准库中使用的模块（无需额外安装）：
-- `os`, `sys`, `json`, `re`, `gzip`, `urllib.parse`
+- `os`, `sys`, `json`, `re`, `argparse`, `urllib.parse`
 
 ## 📝 配置账号信息
 
@@ -77,7 +79,11 @@ execjs>=1.5.1
 
 | 文件名               | 作用                                                           |
 | -------------------- | -------------------------------------------------------------- |
-| `school_login.py`    | 主登录脚本，包含自动探测 Portal、获取公钥、加密密码、发送认证请求等核心逻辑 |
+| `school_login.py`    | 命令行入口，组合各模块完成登录流程                              |
+| `portal.py`          | Portal 探测与 API 交互：重定向捕获、pageInfo/login/logout/getOnlineUserInfo、网络状态检测 |
+| `crypto.py`          | RSA 密码加密：通过 execjs 调用前端 rsa_full.js 实现与 Portal 一致的加密 |
+| `config.py`          | 用户配置管理：password.json 读写、账号选择、Portal 地址与用户信息持久化 |
+| `gui.py`             | 图形化界面（tkinter），可视化账号卡片、一键登录/注销            |
 | `password.json`      | 用户账号配置文件（**需用户自行创建**，不提交至版本控制）       |
 | `rsa_full.js`        | 从校园网 Portal 页面提取的原始 RSA 加密脚本（**静态文件**，无需修改） |
 | `requirements.txt`   | Python 依赖清单，用于 `pip install -r requirements.txt`        |
