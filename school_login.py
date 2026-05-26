@@ -9,8 +9,9 @@ import os
 import sys
 import json
 import re
+import argparse
 from urllib.parse import urlparse, urljoin
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import requests
 import execjs
@@ -86,6 +87,12 @@ def do_login(portal_base: str, username: str, encrypted_pwd: str,
     return _post_api(portal_base, "login", data)
 
 
+def do_logout(portal_base: str, user_index: str) -> Dict:
+    """执行登出请求（POST）"""
+    data = {"userIndex": user_index}
+    return _post_api(portal_base, "logout", data)
+
+
 def get_online_user_info(portal_base: str, user_index: str) -> Optional[str]:
     """获取用户的上网重定向地址（userUrl）"""
     try:
@@ -106,6 +113,76 @@ def extract_mac_from_query(query: str) -> str:
     if not match:
         match = re.search(r"mac=([0-9A-Fa-f]+)", query)
     return match.group(1) if match else DEFAULT_MAC
+
+
+def detect_portal() -> Tuple[str, str, str, str, str]:
+    """
+    探测 Portal 信息，合并 get_redirect_info + fetch_pageInfo + MAC 提取。
+    返回 (portal_base, query_string, exponent, modulus, mac)
+    """
+    full_auth_url = get_redirect_info()
+    parsed = urlparse(full_auth_url)
+    portal_base = f"{parsed.scheme}://{parsed.netloc}"
+    query_string = parsed.query
+    info = fetch_page_info(portal_base, query_string)
+    exponent = info.get("publicKeyExponent", "")
+    modulus = info.get("publicKeyModulus", "")
+    if not exponent or not modulus:
+        raise Exception(f"pageInfo 返回缺少公钥字段: {json.dumps(info, ensure_ascii=False)[:200]}")
+    mac = extract_mac_from_query(query_string)
+    return portal_base, query_string, exponent, modulus, mac
+
+
+NETWORK_CHECK_URL = "http://www.msftconnecttest.com/connecttest.txt"
+
+
+def check_network_status() -> Tuple[str, Optional[Tuple[str, str, str, str, str]]]:
+    """
+    检测当前网络状态。
+
+    返回 (status_string, portal_info_or_None)
+
+    status_string:
+        "已连接校园网"           — 互联网可达且处于校园网内
+        "已连接校园网，暂未登录"  — 检测到强制门户重定向
+        "已连接网络(非校园网)"    — 互联网可达但非校园网
+        "未连接任何网络"          — 无网络连接
+    portal_info: (portal_base, query_string, exponent, modulus, mac) 或 None
+    """
+    # 1. 尝试访问公网测试地址
+    try:
+        resp = requests.get(NETWORK_CHECK_URL, timeout=10, allow_redirects=False)
+    except Exception:
+        return "未连接任何网络", None
+
+    # 2. 根据响应状态码判断
+    if resp.status_code == 200:
+        # 互联网可达，进一步检查是否在校园网内
+        try:
+            portal_info = detect_portal()
+            return "已连接校园网", portal_info
+        except Exception:
+            return "已连接网络(非校园网)", None
+
+    if resp.status_code in (301, 302, 303, 307, 308):
+        # 被重定向到强制门户 → 校园网，未登录
+        location = resp.headers.get("Location", "")
+        try:
+            parsed = urlparse(location)
+            portal_base = f"{parsed.scheme}://{parsed.netloc}"
+            query_string = parsed.query
+            info = fetch_page_info(portal_base, query_string)
+            exponent = info.get("publicKeyExponent", "")
+            modulus = info.get("publicKeyModulus", "")
+            if not exponent or not modulus:
+                raise Exception("公钥字段缺失")
+            mac = extract_mac_from_query(query_string)
+            return "已连接校园网，暂未登录", (portal_base, query_string, exponent, modulus, mac)
+        except Exception:
+            return "已连接校园网，暂未登录", None
+
+    # 其他状态码（404、500 等）
+    return "未连接任何网络", None
 
 
 # ---------- 用户配置处理 ----------
@@ -177,59 +254,40 @@ def encrypt_password(plain_pwd: str, mac: str, exponent: str, modulus: str) -> s
 
 
 # ---------- 主流程 ----------
-def main():
-    # 1. 探测 Portal 重定向地址
+def main(user_override: Optional[Dict] = None):
+    # 1. 探测 Portal
     print("[*] 正在探测 Portal 认证地址...")
     try:
-        full_auth_url = get_redirect_info()
-        print(f"[*] 完整认证页面: {full_auth_url}")
-    except Exception as e:
-        print(f"❌ {e}")
-        sys.exit(1)
-
-    # 2. 解析 Portal 基础地址和 queryString
-    parsed = urlparse(full_auth_url)
-    portal_base = f"{parsed.scheme}://{parsed.netloc}"
-    query_string = parsed.query
-    print(f"[*] Portal 基础地址: {portal_base}")
-
-    # 3. 调用 pageInfo 获取公钥和加密开关
-    print("[*] 调用 pageInfo API 获取 RSA 公钥...")
-    try:
-        info = fetch_page_info(portal_base, query_string)
-        exponent = info.get("publicKeyExponent", "")
-        modulus = info.get("publicKeyModulus", "")
-        if not exponent or not modulus:
-            raise Exception(f"pageInfo 返回缺少公钥字段: {json.dumps(info, ensure_ascii=False)[:200]}")
+        portal_base, query_string, exponent, modulus, mac = detect_portal()
+        print(f"[*] Portal 基础地址: {portal_base}")
         print(f"[+] 公钥获取成功")
         print(f"    exponent: {exponent}")
         print(f"    modulus: {modulus[:40]}...")
+        print(f"[*] 使用 MAC: {mac}")
     except Exception as e:
         print(f"❌ {e}")
         sys.exit(1)
 
-    # 4. 加载用户配置
-    try:
-        users = load_users()
-    except Exception as e:
-        print(f"❌ 加载用户列表失败: {e}")
-        sys.exit(1)
-    if not users:
-        print("❌ 用户列表为空")
-        sys.exit(1)
+    # 2. 确定用户
+    if user_override:
+        user = user_override
+    else:
+        try:
+            users = load_users()
+        except Exception as e:
+            print(f"❌ 加载用户列表失败: {e}")
+            sys.exit(1)
+        if not users:
+            print("❌ 用户列表为空")
+            sys.exit(1)
+        user = select_user(users)
 
-    # 5. 交互选择用户
-    user = select_user(users)
     username = user["account"]
     plain_pwd = user["password"]
     service = user.get("server", "LT")
-    print(f"\n[*] 已选择: {user.get('name')} ({username}) 服务: {service}")
+    print(f"\n[*] 已选择: {user.get('name', username)} ({username}) 服务: {service}")
 
-    # 6. 提取 MAC 地址
-    mac = extract_mac_from_query(query_string)
-    print(f"[*] 使用 MAC: {mac}")
-
-    # 7. RSA 加密密码
+    # 3. RSA 加密密码
     print("[*] 正在加密密码...")
     try:
         encrypted_pwd = encrypt_password(plain_pwd, mac, exponent, modulus)
@@ -238,7 +296,7 @@ def main():
         print(f"❌ 密码加密失败: {e}")
         sys.exit(1)
 
-    # 8. 发送登录请求
+    # 4. 发送登录请求
     print("[*] 执行登录...")
     try:
         result = do_login(portal_base, username, encrypted_pwd, service, query_string)
@@ -246,7 +304,7 @@ def main():
         print(f"❌ 登录请求失败: {e}")
         sys.exit(1)
 
-    # 9. 处理认证结果
+    # 5. 处理认证结果
     if result.get("result") != "success":
         error_msg = result.get("message", "未知错误")
         print(f"❌ 认证失败: {error_msg}")
@@ -258,5 +316,29 @@ def main():
     print(f"   userIndex: {user_index}")
     print(f"   keepaliveInterval: {keepalive_interval} 秒")
 
+    return portal_base, result
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="校园网自动登录")
+    parser.add_argument("-cli", action="store_true", help="命令行交互模式")
+    parser.add_argument("-u", "--username", help="学号/账号")
+    parser.add_argument("-p", "--password", help="密码")
+    parser.add_argument("-s", "--server", default="LT", help="运营商代码 (LT/YD/DX)，默认 LT")
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    if args.username and args.password:
+        user = {
+            "name": args.username,
+            "account": args.username,
+            "password": args.password,
+            "server": args.server,
+        }
+        main(user_override=user)
+    elif args.cli:
+        main()
+    else:
+        from gui import launch_gui
+        launch_gui()
