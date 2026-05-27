@@ -1,3 +1,2 @@
-pyexecjs==1.5.1
 Requests==2.34.2
 pyinstaller==6.20.0

@@ -10,6 +10,10 @@ import os
 import json
 from typing import Dict, List, Optional
 
+from log_utils import get_logger
+
+logger = get_logger(__name__)
+
 PASSWORD_FILE = "py/password.json"
 
 
@@ -31,7 +35,9 @@ def load_users(json_path: str = PASSWORD_FILE) -> List[Dict]:
     if not isinstance(users, list):
         raise ValueError("password.json 格式错误，应为 JSON 数组")
     if not users:
-        print("没有账号信息")
+        logger.warning("没有账号信息")
+    else:
+        logger.debug("加载了 %d 个用户", len(users))
     return users
 
 
@@ -76,6 +82,7 @@ def add_portal_to_user_weblist(account: str, portal_base: str,
             if portal_base not in u["webList"]:
                 u["webList"].append(portal_base)
                 save_users(users, json_path)
+                logger.info("已保存 Portal 地址到 %s: %s", account, portal_base)
             return
 
 
@@ -87,6 +94,7 @@ def save_user_index(account: str, user_index: str,
         if u.get("account") == account:
             u["userIndex"] = user_index
             save_users(users, json_path)
+            logger.info("已保存 userIndex: %s", account)
             return
 
 
@@ -103,4 +111,7 @@ def save_user_portal_info(account: str, info: Dict,
             u["userPackage"] = info.get("userPackage", u.get("userPackage", ""))
             u["userIndex"] = info.get("userIndex", u.get("userIndex", ""))
             save_users(users, json_path)
+            logger.info("已更新用户信息: %s / %s / %s",
+                        info.get("userName"), info.get("realServiceName"),
+                        info.get("userPackage"))
             return

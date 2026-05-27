@@ -13,7 +13,7 @@
 - **多账号支持**：可配置多个账号，运行时自由选择切换
 - **自动加密**：模拟前端 RSA 加密流程，适配校园网 Portal 认证规则
 - **运营商兼容**：支持联通（LT）、移动（YD）、电信（DX）三大运营商
-- **极简依赖**：仅需 Python 3 和 Node.js，无额外复杂环境
+- **极简依赖**：仅需 Python 3，纯 Python RSA 加密，无需 Node.js
 - **一键运行**：交互式选择账号，自动完成认证并输出上网重定向地址
 
 ## 📋 运行环境
@@ -21,7 +21,6 @@
 | 环境          | 版本要求             | 备注                                 |
 | ------------- | -------------------- | ------------------------------------ |
 | Python        | 3.7 及以上           | 开发测试环境为 Python 3.10+          |
-| Node.js       | 12.x 及以上          | 用于执行 `execjs` 调用 RSA 加密脚本  |
 | pip           | 对应 Python 版本     | 用于安装依赖                         |
 
 > 建议使用虚拟环境（`venv`）隔离项目依赖，避免污染系统 Python 环境。
@@ -32,7 +31,6 @@
 
 ```text
 requests>=2.34.2
-execjs>=1.5.1
 ```
 
 标准库中使用的模块（无需额外安装）：
@@ -81,16 +79,16 @@ execjs>=1.5.1
 | -------------------- | -------------------------------------------------------------- |
 | `school_login.py`    | 命令行入口，组合各模块完成登录流程                              |
 | `portal.py`          | Portal 探测与 API 交互：重定向捕获、pageInfo/login/logout/getOnlineUserInfo、网络状态检测 |
-| `crypto.py`          | RSA 密码加密：通过 execjs 调用前端 rsa_full.js 实现与 Portal 一致的加密 |
+| `crypto.py`          | RSA 密码加密：纯 Python 实现，与 Portal 前端加密逻辑一致 |
 | `config.py`          | 用户配置管理：password.json 读写、账号选择、Portal 地址与用户信息持久化 |
 | `gui.py`             | 图形化界面（tkinter），可视化账号卡片、一键登录/注销            |
 | `password.json`      | 用户账号配置文件（**需用户自行创建**，不提交至版本控制）       |
-| `rsa_full.js`        | 从校园网 Portal 页面提取的原始 RSA 加密脚本（**静态文件**，无需修改） |
+| `rsa_full.js`        | 从校园网 Portal 页面提取的原始 RSA 加密脚本（参考文件，运行时不再使用） |
 | `requirements.txt`   | Python 依赖清单，用于 `pip install -r requirements.txt`        |
 
 ## 🚀 各平台运行方式
 
-> **前提**：已安装 Python 3 和 Node.js，并确保 `node` 命令可在终端中执行。
+> **前提**：已安装 Python 3。
 
 所有步骤均在**项目根目录**下执行。
 
@@ -139,8 +137,7 @@ python school_login.py -u <account> -p <password> -s <server>
 ## ⚠️ 注意事项
 
 1. **环境要求**  
-   - 必须安装 Node.js，且确保 `node --version` 能正常输出版本号。  
-   - 如果不需要 `execjs`（即不想依赖 Node.js），可使用“纯 Python RSA 加密”替代方案（需自行修改脚本）。
+   - 仅需 Python 3.7+，RSA 加密已用纯 Python 实现，无需 Node.js。
 
 2. **配置文件安全**  
    - `password.json` 包含明文密码，请妥善保管，**切勿提交至公开代码仓库**。建议将 `password.json` 加入 `.gitignore`。
@@ -156,13 +153,13 @@ python school_login.py -u <account> -p <password> -s <server>
 
 ## ❓ 常见问题
 
-### Q1: 运行时报错 `ModuleNotFoundError: No module named 'execjs'`
+### Q1: 运行时报错 `ModuleNotFoundError: No module named 'requests'`
 
 A: 未安装依赖，请执行 `pip install -r requirements.txt`（确保已激活虚拟环境）。
 
-### Q2: 提示 `缺失 rsa_full.js 文件`
+### Q2: 加密失败怎么办？
 
-A: 请确认 `rsa_full.js` 文件存在于脚本同目录下，且内容完整（可从 Portal 页面源码中提取或从项目 release 中获取）。
+A: RSA 加密已改为纯 Python 实现，不再依赖 `rsa_full.js`。如果 Portal 更新了加密方式，请参考 `rsa_full.js`（保留作为参考）更新 `crypto.py` 中的加密逻辑。
 
 ### Q3: 认证失败，返回 `passwordEncrypt` 错误或 `message` 包含“加密错误”
 
@@ -175,9 +172,9 @@ A: 可能原因：
 
 A: 这是系统 Python 环境受保护所致，请使用虚拟环境（`venv`）或在命令后添加 `--break-system-packages`（不推荐）。
 
-### Q5: 如何在不安装 Node.js 的情况下使用？
+### Q5: 如何查看运行日志？
 
-A：可以采用“纯 Python RSA 加密”实现（将 `encrypt_password` 函数替换为基于 `pow` 的实现），但需确保与前端加密逻辑完全一致。可参考项目 issues 中的相关讨论。
+A：日志自动保存到 `py/{日期}-logs/` 目录下，文件名格式为 `login-{时间}.log`。控制台同步输出 INFO 级别日志，日志文件包含完整 DEBUG 级别记录。
 
 ## 📄 许可证
 

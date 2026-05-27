@@ -16,20 +16,18 @@ from config import (
     add_portal_to_user_weblist, save_user_portal_info,
 )
 from crypto import encrypt_password
+from log_utils import get_logger
+
+logger = get_logger(__name__)
 
 
 def main(user_override: Optional[Dict] = None):
-    # 1. 探测 Portal
-    print("[*] 正在探测 Portal 认证地址...")
+    # 1. 探测 Portal（日志已在 detect_portal 内部记录）
+    logger.info("开始登录流程")
     try:
         portal_base, query_string, exponent, modulus, mac = detect_portal()
-        print(f"[*] Portal 基础地址: {portal_base}")
-        print(f"[+] 公钥获取成功")
-        print(f"    exponent: {exponent}")
-        print(f"    modulus: {modulus[:40]}...")
-        print(f"[*] 使用 MAC: {mac}")
     except Exception as e:
-        print(f"❌ {e}")
+        logger.error("Portal 探测失败: %s", e)
         sys.exit(1)
 
     # 2. 确定用户
@@ -39,15 +37,15 @@ def main(user_override: Optional[Dict] = None):
         try:
             users = load_users()
         except Exception as e:
-            print(f"❌ 加载用户列表失败: {e}")
+            logger.error("加载用户列表失败: %s", e)
             sys.exit(1)
         if not users:
-            print("❌ 用户列表为空")
+            logger.error("用户列表为空")
             sys.exit(1)
 
         auto_user = auto_detect_user(users, portal_base)
         if auto_user:
-            print(f"[*] 自动识别用户: {auto_user.get('name')} (Portal: {portal_base})")
+            logger.info("自动识别用户: %s (Portal: %s)", auto_user.get("name"), portal_base)
             user = auto_user
         else:
             user = select_user(users)
@@ -55,53 +53,46 @@ def main(user_override: Optional[Dict] = None):
     username = user["account"]
     plain_pwd = user["password"]
     service = user.get("server", "LT")
-    print(f"\n[*] 已选择: {user.get('name', username)} ({username}) 服务: {service}")
+    logger.info("已选择: %s (%s) 服务: %s", user.get("name", username), username, service)
 
     # 3. RSA 加密密码
-    print("[*] 正在加密密码...")
     try:
         encrypted_pwd = encrypt_password(plain_pwd, mac, exponent, modulus)
-        print(f"[+] 加密完成，密文长度: {len(encrypted_pwd)}")
     except Exception as e:
-        print(f"❌ 密码加密失败: {e}")
+        logger.error("密码加密失败: %s", e)
         sys.exit(1)
 
     # 4. 发送登录请求
-    print("[*] 执行登录...")
+    logger.info("执行登录请求...")
     try:
         result = do_login(portal_base, username, encrypted_pwd, service, query_string)
     except Exception as e:
-        print(f"❌ 登录请求失败: {e}")
+        logger.error("登录请求失败: %s", e)
         sys.exit(1)
 
     # 5. 处理认证结果
     if result.get("result") != "success":
         error_msg = result.get("message", "未知错误")
-        print(f"❌ 认证失败: {error_msg}")
+        logger.error("认证失败: %s", error_msg)
         sys.exit(1)
 
-    print("✅ 认证成功！")
+    logger.info("✅ 认证成功!")
     user_index = result.get("userIndex")
     keepalive_interval = result.get("keepaliveInterval")
-    print(f"   userIndex: {user_index}")
-    print(f"   keepaliveInterval: {keepalive_interval} 秒")
+    logger.info("userIndex: %s, keepaliveInterval: %s 秒", user_index, keepalive_interval)
 
     # 6. 保存 Portal 地址和用户信息到本地配置
     if not user_override:
         add_portal_to_user_weblist(username, portal_base)
-        print(f"[*] 已保存 Portal 地址: {portal_base}")
-
-        # 先保存 userIndex（login 响应直接提供，不依赖 getOnlineUserInfo）
         save_user_index(username, user_index)
-        print(f"[*] 已保存 userIndex")
 
-        # 再尝试获取更丰富的在线用户信息
         online_info = get_online_user_info(portal_base, user_index)
         if online_info:
             save_user_portal_info(username, online_info)
-            print(f"[*] 已更新用户信息: {online_info.get('userName')}"
-                  f" / {online_info.get('realServiceName')}"
-                  f" / {online_info.get('userPackage')}")
+            logger.info("已更新用户信息: %s / %s / %s",
+                        online_info.get("userName"),
+                        online_info.get("realServiceName"),
+                        online_info.get("userPackage"))
 
     return portal_base, result
 

@@ -36,9 +36,20 @@ jobs:
       - name: Install PyInstaller
         run: pip install pyinstaller
 
-      - name: Build with PyInstaller
+      - name: Build with PyInstaller (Windows)
+        if: runner.os == 'Windows'
         run: |
-          pyinstaller --onefile --name campus-net-login school_login.py
+          pyinstaller --onefile --noconsole --icon=icon.ico --name campus-net-login school_login.py
+
+      - name: Build with PyInstaller (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          pyinstaller --onefile --icon=icon.ico --name campus-net-login school_login.py
+
+      - name: Build with PyInstaller (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          pyinstaller --onefile --icon=icon.ico --name campus-net-login school_login.py
 
       # ---------- Linux 专用：使用 fpm 打包成 deb/rpm ----------
       - name: Install fpm (Linux only)

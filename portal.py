@@ -15,6 +15,9 @@ from urllib.parse import urljoin, urlparse
 import requests
 
 from config import load_users
+from log_utils import get_logger, mask_password
+
+logger = get_logger(__name__)
 
 # ---------- 常量 ----------
 DETECT_URL = "http://www.baidu.com"          # 触发 Portal 重定向的外网地址
@@ -29,20 +32,30 @@ def _get_api(portal_base: str, method: str, params: Dict) -> Dict:
     """发送 GET 请求到 /eportal/InterFace.do，返回解析后的 JSON。"""
     url = urljoin(portal_base, f"/eportal/InterFace.do?method={method}")
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    logger.debug("GET API: url=%s, params=%s", url, params)
     resp = _session.get(url, params=params, headers=headers, timeout=10)
     resp.raise_for_status()
     resp.encoding = "utf-8"
-    return resp.json()
+    data = resp.json()
+    logger.debug("GET API 响应: status=%d, body_preview=%s",
+                 resp.status_code, json.dumps(data, ensure_ascii=False)[:300])
+    return data
 
 
 def _post_api(portal_base: str, method: str, data: Dict) -> Dict:
     """发送 POST 请求到 /eportal/InterFace.do，返回解析后的 JSON。"""
     url = urljoin(portal_base, f"/eportal/InterFace.do?method={method}")
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    safe_data = {k: (mask_password(v) if k == "password" else v)
+                 for k, v in data.items()}
+    logger.debug("POST API: url=%s, data=%s", url, safe_data)
     resp = _session.post(url, data=data, headers=headers, timeout=10)
     resp.raise_for_status()
     resp.encoding = "utf-8"
-    return resp.json()
+    result = resp.json()
+    logger.debug("POST API 响应: status=%d, body_preview=%s",
+                 resp.status_code, json.dumps(result, ensure_ascii=False)[:300])
+    return result
 
 
 # ---------- Portal 重定向探测 ----------
@@ -52,13 +65,13 @@ def get_redirect_info(detect_url: str = DETECT_URL) -> str:
     返回如：http://172.16.54.18/eportal/index.jsp?wlanuserip=...
     """
     resp = requests.get(detect_url, timeout=10, allow_redirects=False)
-    print(f"[DEBUG] get_redirect_info: {detect_url} → HTTP {resp.status_code}")
+    logger.debug("get_redirect_info: %s -> HTTP %d", detect_url, resp.status_code)
     if resp.status_code not in (301, 302, 303, 307, 308):
         raise Exception(f"未发生重定向 (HTTP {resp.status_code})，可能已在线或无需认证")
     location = resp.headers.get("Location")
     if not location:
         raise Exception("重定向响应中缺少 Location 头")
-    print(f"[DEBUG]   Location: {location[:150]}...")
+    logger.debug("  Location: %s...", location[:150])
     return location
 
 
@@ -100,19 +113,19 @@ def do_logout(portal_base: str, user_index: str) -> Dict:
 
 def get_online_user_info(portal_base: str, user_index: str) -> Optional[Dict]:
     """获取当前在线用户的详细信息（POST），成功返回完整响应 dict。"""
-    print(f"[DEBUG] getOnlineUserInfo: portal={portal_base}, userIndex={user_index[:40]}...")
+    logger.debug("getOnlineUserInfo: portal=%s, userIndex=%s...", portal_base, user_index[:40])
     try:
         data = _post_api(portal_base, "getOnlineUserInfo", {"userIndex": user_index})
         result = data.get("result", "")
         msg = data.get("message", "")
-        print(f"[DEBUG]   响应: result={result}, message={msg}")
+        logger.debug("  响应: result=%s, message=%s", result, msg)
         if result == "success":
             return data
         else:
-            print(f"⚠️  获取在线信息失败: {msg}")
+            logger.warning("获取在线信息失败: %s", msg)
             return None
     except Exception as e:
-        print(f"⚠️  获取在线信息异常: {e}")
+        logger.warning("获取在线信息异常: %s", e)
         return None
 
 
@@ -121,16 +134,20 @@ def detect_portal() -> Tuple[str, str, str, str, str]:
     探测 Portal 信息，合并重定向获取 + pageInfo + MAC 提取。
     返回 (portal_base, query_string, exponent, modulus, mac)
     """
+    logger.info("开始探测 Portal 认证地址...")
     full_auth_url = get_redirect_info()
     parsed = urlparse(full_auth_url)
     portal_base = f"{parsed.scheme}://{parsed.netloc}"
     query_string = parsed.query
+    logger.info("Portal 基础地址: %s", portal_base)
     info = fetch_page_info(portal_base, query_string)
     exponent = info.get("publicKeyExponent", "")
     modulus = info.get("publicKeyModulus", "")
     if not exponent or not modulus:
         raise Exception(f"pageInfo 返回缺少公钥字段: {json.dumps(info, ensure_ascii=False)[:200]}")
+    logger.info("公钥获取成功: exponent=%s, modulus_len=%d", exponent, len(modulus))
     mac = extract_mac_from_query(query_string)
+    logger.info("使用 MAC: %s", mac)
     return portal_base, query_string, exponent, modulus, mac
 
 
@@ -140,7 +157,7 @@ def _collect_saved_portals() -> List[str]:
     try:
         users = load_users()
     except Exception as e:
-        print(f"[DEBUG] 加载用户配置失败: {e}")
+        logger.debug("加载用户配置失败: %s", e)
         return []
     seen = set()
     result = []
@@ -149,7 +166,7 @@ def _collect_saved_portals() -> List[str]:
             if portal_base not in seen:
                 seen.add(portal_base)
                 result.append(portal_base)
-    print(f"[DEBUG] 已保存的 Portal 地址: {result if result else '(空)'}")
+    logger.debug("已保存的 Portal 地址: %s", result if result else "(空)")
     return result
 
 
@@ -159,41 +176,42 @@ def _try_detect_online_user(portal_base: str) -> Optional[Dict]:
     返回 {"user": 用户配置, "info": 在线信息} 或 None。
     """
     # 先访问 Portal 首页获取 session cookie（JSESSIONID），后续 API 调用需要它
-    print(f"[DEBUG] 预热 session: GET {portal_base}")
+    logger.debug("预热 session: GET %s", portal_base)
     try:
         warm_resp = _session.get(portal_base, timeout=5)
-        print(f"[DEBUG] 预热响应: HTTP {warm_resp.status_code}, cookies: "
-              f"{dict(_session.cookies.get_dict()) if _session.cookies else '(无)'}")
+        logger.debug("预热响应: HTTP %d, cookies: %s",
+                     warm_resp.status_code,
+                     dict(_session.cookies.get_dict()) if _session.cookies else "(无)")
     except Exception as e:
-        print(f"[DEBUG] 预热请求失败: {e}")
+        logger.debug("预热请求失败: %s", e)
 
     try:
         users = load_users()
     except Exception as e:
-        print(f"[DEBUG] 加载用户列表失败: {e}")
+        logger.debug("加载用户列表失败: %s", e)
         return None
 
-    print(f"[DEBUG] 共 {len(users)} 个用户，逐一尝试已保存的 userIndex...")
+    logger.debug("共 %d 个用户，逐一尝试已保存的 userIndex...", len(users))
     for u in users:
         user_index = u.get("userIndex", "")
         account = u.get("account", "?")
         name = u.get("name", "?")
         if not user_index:
-            print(f"[DEBUG]   跳过 {name}({account}): 无 userIndex")
+            logger.debug("  跳过 %s(%s): 无 userIndex", name, account)
             continue
-        print(f"[DEBUG]   尝试 {name}({account}), userIndex={user_index[:30]}...")
+        logger.debug("  尝试 %s(%s), userIndex=%s...", name, account, user_index[:30])
         try:
             info = get_online_user_info(portal_base, user_index)
             if info and info.get("result") == "success":
-                print(f"[DEBUG]   ✅ 匹配成功! userName={info.get('userName')}, "
-                      f"service={info.get('realServiceName')}")
+                logger.debug("  ✅ 匹配成功! userName=%s, service=%s",
+                           info.get("userName"), info.get("realServiceName"))
                 return {"user": u, "info": info}
             else:
                 msg = info.get("message", "无消息") if info else "返回 None"
-                print(f"[DEBUG]   ❌ 失败: {msg}")
+                logger.debug("  ❌ 失败: %s", msg)
         except Exception as e:
-            print(f"[DEBUG]   ❌ 异常: {e}")
-    print(f"[DEBUG] 未匹配到任何在线用户")
+            logger.debug("  ❌ 异常: %s", e)
+    logger.debug("未匹配到任何在线用户")
     return None
 
 
@@ -210,23 +228,23 @@ def _try_saved_portals():
     """
     portals = _collect_saved_portals()
     if not portals:
-        print("[DEBUG] _try_saved_portals: 没有已保存的 portal 地址")
+        logger.debug("_try_saved_portals: 没有已保存的 portal 地址")
         return None
     for portal_base in portals:
-        print(f"[DEBUG] _try_saved_portals: 尝试直连 {portal_base}")
+        logger.debug("_try_saved_portals: 尝试直连 %s", portal_base)
         try:
             resp = requests.get(portal_base, timeout=5)
-            print(f"[DEBUG]   直连成功: HTTP {resp.status_code}")
+            logger.debug("  直连成功: HTTP %d", resp.status_code)
         except Exception as e:
-            print(f"[DEBUG]   直连失败: {e}")
+            logger.debug("  直连失败: %s", e)
             continue
         result = _try_detect_online_user(portal_base)
         if result:
-            print(f"[DEBUG] _try_saved_portals: 识别到在线用户")
+            logger.debug("_try_saved_portals: 识别到在线用户")
             return ("已连接校园网",
                     (portal_base, "", "", "", ""),
                     result)
-        print(f"[DEBUG] _try_saved_portals: Portal 可达但未识别用户")
+        logger.debug("_try_saved_portals: Portal 可达但未识别用户")
         return ("已连接校园网",
                 (portal_base, "", "", "", ""),
                 None)
@@ -248,25 +266,25 @@ def check_network_status():
     online_user: {"user": ..., "info": ...} 或 None
     """
     # 1. 尝试访问外网地址触发 Portal 重定向
-    print(f"[DEBUG] check_network_status: 请求 {DETECT_URL}")
+    logger.debug("check_network_status: 请求 %s", DETECT_URL)
     try:
         resp = requests.get(DETECT_URL, timeout=10, allow_redirects=False)
-        print(f"[DEBUG]   响应: HTTP {resp.status_code}")
+        logger.debug("  响应: HTTP %d", resp.status_code)
     except Exception as e:
-        print(f"[DEBUG]   请求失败: {e}")
+        logger.debug("  请求失败: %s", e)
         # 网络不通，尝试直连已保存的 portal 地址
         saved = _try_saved_portals()
         result = saved if saved else ("未连接任何网络", None, None)
-        print(f"[DEBUG] 最终状态: {result[0]}")
+        logger.debug("最终状态: %s", result[0])
         return result
 
     location = resp.headers.get("Location", "")
     if location:
-        print(f"[DEBUG]   Location: {location[:120]}...")
+        logger.debug("  Location: %s...", location[:120])
 
     # 2. 强制门户重定向（Location 包含 /eportal/）→ 校园网，未登录
     if resp.status_code in (301, 302, 303, 307, 308) and _is_portal_redirect(location):
-        print("[DEBUG]   识别为 Portal 重定向 → 未登录")
+        logger.debug("  识别为 Portal 重定向 → 未登录")
         try:
             parsed = urlparse(location)
             portal_base = f"{parsed.scheme}://{parsed.netloc}"
@@ -280,31 +298,31 @@ def check_network_status():
             result = ("已连接校园网，暂未登录",
                       (portal_base, query_string, exponent, modulus, mac),
                       None)
-            print(f"[DEBUG] 最终状态: {result[0]}")
+            logger.debug("最终状态: %s", result[0])
             return result
         except Exception as e:
-            print(f"[DEBUG]   Portal 解析失败: {e}")
+            logger.debug("  Portal 解析失败: %s", e)
             result = ("已连接校园网，暂未登录", None, None)
-            print(f"[DEBUG] 最终状态: {result[0]}")
+            logger.debug("最终状态: %s", result[0])
             return result
 
     if resp.status_code in (301, 302, 303, 307, 308):
-        print("[DEBUG]   3xx 但不是 Portal 重定向 (如 HTTP→HTTPS) → 视为互联网可达")
+        logger.debug("  3xx 但不是 Portal 重定向 (如 HTTP→HTTPS) → 视为互联网可达")
 
     # 3. 互联网可达（200 或非 Portal 的 3xx）→ 尝试已保存 portal 地址
     if resp.status_code == 200 or resp.status_code in (301, 302, 303, 307, 308):
-        print("[DEBUG]   互联网可达，尝试已保存 portal...")
+        logger.debug("  互联网可达，尝试已保存 portal...")
         saved = _try_saved_portals()
         if saved:
-            print(f"[DEBUG] 最终状态: {saved[0]}")
+            logger.debug("最终状态: %s", saved[0])
             return saved
         result = ("已连接网络(非校园网)", None, None)
-        print(f"[DEBUG] 最终状态: {result[0]}")
+        logger.debug("最终状态: %s", result[0])
         return result
 
     # 4. 其他状态码
-    print(f"[DEBUG]   非预期状态码 {resp.status_code}，尝试已保存 portal...")
+    logger.debug("  非预期状态码 %d，尝试已保存 portal...", resp.status_code)
     saved = _try_saved_portals()
     result = saved if saved else ("未连接任何网络", None, None)
-    print(f"[DEBUG] 最终状态: {result[0]}")
+    logger.debug("最终状态: %s", result[0])
     return result

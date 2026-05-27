@@ -18,6 +18,9 @@ from config import (
     save_user_index, save_user_portal_info, save_users,
 )
 from crypto import encrypt_password
+from log_utils import get_logger
+
+logger = get_logger(__name__)
 
 
 SERVER_MAP = {"LT": "联通", "YD": "移动", "DX": "电信"}
@@ -230,6 +233,7 @@ class CampusNetworkApp:
     def _on_add_account(self):
         dialog = AddAccountDialog(self.root)
         if dialog.result:
+            logger.info("添加账号: %s (%s)", dialog.result.get("name"), dialog.result.get("account"))
             self.users.append(dialog.result)
             save_users(self.users)
             self._refresh_account_list()
@@ -278,9 +282,11 @@ class CampusNetworkApp:
         def run():
             try:
                 status, portal_info, online_user = check_network_status()
-            except Exception:
+            except Exception as e:
+                logger.warning("网络检测异常: %s", e)
                 status, portal_info, online_user = "未连接任何网络", None, None
 
+            logger.info("网络状态: %s", status)
             if portal_info:
                 self.portal_info = portal_info
 
@@ -334,6 +340,7 @@ class CampusNetworkApp:
 
     # ---------- 登录流程 ----------
     def _on_login_click(self, user: dict):
+        logger.info("点击登录: %s (%s)", user.get("name"), user.get("account"))
         if not self.portal_info:
             messagebox.showwarning("提示", "网络尚未检测完成，请稍后再试")
             return
@@ -393,6 +400,7 @@ class CampusNetworkApp:
         threading.Thread(target=run, daemon=True).start()
 
     def _on_login_ok(self, user: dict, user_index: str):
+        logger.info("登录成功: %s (%s)", user.get("name"), user.get("account"))
         self.online_user_index = user_index
         self.current_user_card = user
 
@@ -422,6 +430,7 @@ class CampusNetworkApp:
         threading.Thread(target=run, daemon=True).start()
 
     def _on_login_fail(self, user: dict, error: str):
+        logger.error("登录失败: %s (%s) - %s", user.get("name"), user.get("account"), error)
         widgets = user["_widgets"]
         widgets["btn"].config(state="normal", text="登录")
         widgets["status_label"].config(text=f"登录失败: {error}", foreground="red")
@@ -429,6 +438,7 @@ class CampusNetworkApp:
 
     # ---------- 注销流程 ----------
     def _on_logout_click(self, user: dict):
+        logger.info("点击注销: %s (%s)", user.get("name"), user.get("account"))
         if not messagebox.askyesno("确认注销", "是否退出登录?"):
             return
 
@@ -458,6 +468,7 @@ class CampusNetworkApp:
         threading.Thread(target=run, daemon=True).start()
 
     def _on_logout_ok(self, user: dict):
+        logger.info("注销成功: %s (%s)", user.get("name"), user.get("account"))
         self.online_user_index = None
         self.current_user_card = None
 
@@ -480,6 +491,7 @@ class CampusNetworkApp:
         messagebox.showinfo("注销成功", "已退出登录")
 
     def _on_logout_fail(self, user: dict, error: str):
+        logger.error("注销失败: %s (%s) - %s", user.get("name"), user.get("account"), error)
         widgets = user["_widgets"]
         widgets["btn"].config(state="normal", text="注销")
         widgets["status_label"].config(text=f"注销失败: {error}", foreground="red")
@@ -487,6 +499,7 @@ class CampusNetworkApp:
 
 
 def launch_gui():
+    logger.info("启动 GUI 界面")
     init_password_file()
     root = tk.Tk()
     CampusNetworkApp(root)

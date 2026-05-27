@@ -4,26 +4,27 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-校园网 (campus network) captive portal auto-login script for 深澜 (Srun) portal systems. Detects the portal redirect, fetches RSA public key parameters via the portal API, encrypts the password in-browser-style via `execjs`, and submits the authentication request.
+校园网 (campus network) captive portal auto-login script for 深澜 (Srun) portal systems. Detects the portal redirect, fetches RSA public key parameters via the portal API, encrypts the password with pure Python RSA, and submits the authentication request.
 
 ## Commands
 
 ```bash
-pip install -r requirements.txt   # install dependencies (pyexecjs, requests)
+pip install -r requirements.txt   # install dependencies (requests)
 python3 school_login.py           # run the script
 ```
 
-Requires Node.js (for `execjs` JS runtime) and Python 3.7+.
+Requires Python 3.7+ only. RSA encryption is pure Python — no Node.js needed.
 
 ## Architecture
 
 ```
 school_login.py          # CLI entry point — orchestrates login flow
 portal.py                # Portal detection, API calls, network status
-crypto.py                # RSA encryption via execjs
+crypto.py                # Pure Python RSA encryption (pow-based, no execjs)
 config.py                # User config CRUD (password.json), auto-detect, portal info persistence
 gui.py                   # Tkinter GUI
-rsa_full.js              # Third-party RSA big-integer library (David Shapiro, mod. Fuchun)
+log_utils.py             # Logging setup (date-based dirs, password masking)
+rsa_full.js              # Reference: original JS RSA library (no longer used at runtime)
 py/password.json         # User credentials (gitignored, use py/password.example.json as template)
 requirements.txt         # pip dependencies
 ```
@@ -40,7 +41,8 @@ requirements.txt         # pip dependencies
 - `_get_api()` / `_post_api()` — generic Portal API helpers (hit `/eportal/InterFace.do?method=...`)
 
 **`crypto.py`** — RSA password encryption:
-- `encrypt_password()` — runs `rsa_full.js` via `execjs`, implements the `{password}>{MAC}` + reverse + RSA pipeline
+- `encrypt_password()` — pure Python RSA: `{password}>{MAC}` + reverse + RSA via `pow(x, e, m)`
+- `_bi_to_hex()` — matches JS `biToHex` output format (16-bit digits, 4 hex chars each, zero-padded)
 
 **`config.py`** — Local user configuration:
 - `load_users()` / `save_users()` — read/write `py/password.json`
@@ -63,14 +65,23 @@ requirements.txt         # pip dependencies
 
 ## RSA encryption
 
-The encryption scheme is specific to 深澜 portals:
+The encryption scheme is specific to 深澜 portals, implemented in pure Python in `crypto.py`:
 
 1. Concatenate: `{password}>{MAC}`
 2. Reverse the entire string
-3. RSA-encrypt with the portal's public key (exponent + modulus from `pageInfo`)
-4. Remove spaces from the result
+3. Convert to char codes, zero-pad to chunkSize (matching JS `encryptedString`)
+4. Parse exponent/modulus hex strings to Python `int`
+5. For each chunk: pack bytes as `int` (little-endian, matching JS BigInt construction), then `pow(block, e, m)`
+6. Convert result to hex via `_bi_to_hex()` — matches JS `biToHex` (16-bit digits, 4 hex chars each, high-first)
+7. Join all chunk hex outputs (no spaces)
 
-`rsa_full.js` attaches to `window`, so `encrypt_password()` replaces `})(window)` with `})(globalThis)` before feeding it to `execjs`. The JS engine needs to provide a `globalThis` — Node.js works.
+`rsa_full.js` is kept as reference only — it is the original JS extracted from the portal page. If the portal updates its encryption, compare against this file to update `crypto.py`.
+
+## Logging
+
+Logs are written to `py/{YYYY-MM-DD}-logs/login-{HH-MM-SS}-{microseconds}.log`. The `log_utils` module provides:
+- `get_logger(name)` — returns a configured logger (file: DEBUG, console: INFO)
+- `mask_password(pwd)` — returns `pwd[:2] + "****"` for safe logging
 
 ## Password config format
 
@@ -101,4 +112,5 @@ The encryption scheme is specific to 深澜 portals:
 - `DETECT_URL` is `http://www.baidu.com` (not HTTPS) — captive portals intercept HTTP but pass HTTPS through.
 - The `pageInfo` API is a GET request; `login`, `logout`, `getOnlineUserInfo` are POST.
 - `check_network_status()` returns a 3-tuple `(status, portal_info, online_user)` — the third element carries auto-detected user info when the user is already logged in.
-- `rsa_full.js` is a static third-party file extracted from the portal page; if the portal updates its encryption, this file must be updated to match.
+- `rsa_full.js` is kept as a reference file; RSA encryption is now pure Python in `crypto.py`.
+- Logs are saved to `py/{date}-logs/` directory; the pattern is gitignored.
