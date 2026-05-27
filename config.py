@@ -42,10 +42,11 @@ def load_users(json_path: str = PASSWORD_FILE) -> List[Dict]:
 
 
 def save_users(users: List[Dict], json_path: str = PASSWORD_FILE) -> None:
-    """保存用户列表到配置文件"""
+    """保存用户列表到配置文件，自动过滤 _widgets 等不可序列化的运行时字段。"""
     os.makedirs(os.path.dirname(json_path) or ".", exist_ok=True)
+    clean = [{k: v for k, v in u.items() if k != "_widgets"} for u in users]
     with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(users, f, ensure_ascii=False, indent=2)
+        json.dump(clean, f, ensure_ascii=False, indent=2)
 
 
 def select_user(users: List[Dict]) -> Dict:
